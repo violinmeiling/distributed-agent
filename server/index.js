@@ -156,13 +156,54 @@ io.on('connection', (socket) => {
   });
 
    socket.on('enableSickoMode', () => {
-    sickoModeActive = true;
-    io.emit('sickoModeState', { enabled: true });
+    if (!sickoModeActive) {
+      sickoModeActive = true;
+      io.emit('sickoModeState', { enabled: true });
+      sickoInterval = setInterval(() => {
+        const deviceNames = Object.keys(deviceTable);
+        if (deviceNames.length === 0) return;
+        const randomDevice = deviceNames[Math.floor(Math.random() * deviceNames.length)];
+        // Start a computation from a random device
+        io.emit('clearRelay');
+        if (deviceSockets[randomDevice]) {
+          io.to(deviceSockets[randomDevice]).emit('relayStarted');
+        }
+        relayState = {
+          originDevice: randomDevice,
+          currentGroup: 0,
+          groupsOrder: [0, 1, 2],
+        };
+        const groupDevices = groupToDeviceTable[0] || [];
+        if (deviceNames.length > 3 && groupDevices.length > 1) {
+          const idx = Math.floor(Math.random() * groupDevices.length);
+          const chosen = groupDevices[idx];
+          if (deviceSockets[chosen]) {
+            io.to(deviceSockets[chosen]).emit('relayMessage', {
+              message: 'hello world 0',
+              group: 0,
+            });
+          }
+        } else {
+          groupDevices.forEach(dName => {
+            if (deviceSockets[dName]) {
+              io.to(deviceSockets[dName]).emit('relayMessage', {
+                message: 'hello world 0',
+                group: 0,
+              });
+            }
+          });
+        }
+      }, 2000); // every 2 seconds
+    }
   });
 
   socket.on('disableSickoMode', () => {
-    sickoModeActive = false;
-    io.emit('sickoModeState', { enabled: false });
+    if (sickoModeActive) {
+      sickoModeActive = false;
+      io.emit('sickoModeState', { enabled: false });
+      if (sickoInterval) clearInterval(sickoInterval);
+      sickoInterval = null;
+    }
   });
 
   // On new connection, send current state
