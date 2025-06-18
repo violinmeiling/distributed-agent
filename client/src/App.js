@@ -18,7 +18,7 @@ const LAYER_COLORS = [
 ];
 
 function App() {
-  const [relayLines, setRelayLines] = useState([]); // Array of {text, color}
+  const [relayLines, setRelayLines] = useState([]);
   const socketRef = useRef(null);
   const [deviceName, setDeviceName] = useState('');
   const [joined, setJoined] = useState(false);
@@ -26,7 +26,6 @@ function App() {
   const [done, setDone] = useState(false);
   const [relayInProgress, setRelayInProgress] = useState(false);
   const [sickoMode, setSickoMode] = useState(false);
-  const sickoIntervalRef = useRef(null);
   const [root, setRoot] = useState(false);
 
   // Connect socket on mount
@@ -63,7 +62,7 @@ function App() {
 
       socketRef.current.on('clearRelay', () => {
         setRelayLines([]);
-        setRelayInProgress(true); // Mark relay as started
+        setRelayInProgress(true);
       });
 
       socketRef.current.on('relayStarted', () => {
@@ -93,7 +92,7 @@ function App() {
 
       socketRef.current.on('relayFinished', ({ message }) => {
         setRelayLines(prev => prev.concat({ text: message, color: '#222', key: `finished-${Date.now()}` }));
-        setRelayInProgress(false); // Mark relay as finished
+        setRelayInProgress(false);
       });
 
       // Sicko mode state sync
@@ -111,15 +110,9 @@ function App() {
     };
   }, [joined, deviceName, layers]);
 
-  // Helper to fetch all device names from backend
-  const fetchDeviceNames = async () => {
-    const res = await fetch('https://distributed-agent.onrender.com/devices');
-    return await res.json();
-  };
-
   const joinNetwork = async () => {
     if (!deviceName) return;
-    if (deviceName == "root") {
+    if (deviceName === "root") {
       setRoot(true);
     }
     await fetch('https://distributed-agent.onrender.com/joinNetwork', {
@@ -153,35 +146,18 @@ function App() {
   };
 
   const runComputation = () => {
-    setRelayLines([]); // Clear previous relay lines
+    setRelayLines([]);
     socketRef.current.emit('startRelay', deviceName);
   };
 
-  // Sicko mode logic
-  const startSickoMode = async () => {
+  // Sicko mode logic: just emit, backend handles interval and sync
+  const startSickoMode = () => {
     socketRef.current.emit('enableSickoMode');
-    setRelayInProgress(false); // Ensure clean start
-    sickoIntervalRef.current = setInterval(async () => {
-      if (relayInProgress) return; // Wait for previous relay to finish
-      const devices = await fetchDeviceNames();
-      if (devices.length === 0) return;
-      const randomDevice = devices[Math.floor(Math.random() * devices.length)];
-      setRelayInProgress(true);
-      socketRef.current.emit('startRelay', randomDevice);
-    }, 500); // check every 500ms, but only start if not in progress
   };
 
   const stopSickoMode = () => {
     socketRef.current.emit('disableSickoMode');
-    if (sickoIntervalRef.current) clearInterval(sickoIntervalRef.current);
   };
-
-  // Cleanup sicko interval on unmount
-  useEffect(() => {
-    return () => {
-      if (sickoIntervalRef.current) clearInterval(sickoIntervalRef.current);
-    };
-  }, []);
 
   return (
     <div>
@@ -210,7 +186,6 @@ function App() {
       <button onClick={stopSickoMode} disabled={!root || !sickoMode}>
         Disable Sicko Mode
       </button>
-      {/* Relay output below controls, normal font */}
       <div style={{ margin: '1em 0', minHeight: 120 }}>
         {relayLines.map(line => (
           <div key={line.key} style={{ color: line.color }}>
