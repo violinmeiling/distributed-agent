@@ -137,6 +137,44 @@ app.get('/devices', (req, res) => {
 });
 
 let relayState = null;
+
+// --- SICKO MODE: Only start a new computation after the previous one finishes ---
+function startSickoComputation() {
+  if (!sickoModeActive) return;
+  const deviceNames = Object.keys(deviceTable);
+  if (deviceNames.length === 0) return;
+  const randomDevice = deviceNames[Math.floor(Math.random() * deviceNames.length)];
+  io.emit('clearRelay');
+  if (deviceSockets[randomDevice]) {
+    io.to(deviceSockets[randomDevice]).emit('relayStarted');
+  }
+  relayState = {
+    originDevice: randomDevice,
+    currentGroup: 0,
+    groupsOrder: [0, 1, 2],
+  };
+  const groupDevices = groupToDeviceTable[0] || [];
+  if (deviceNames.length > 3 && groupDevices.length > 1) {
+    const idx = Math.floor(Math.random() * groupDevices.length);
+    const chosen = groupDevices[idx];
+    if (deviceSockets[chosen]) {
+      io.to(deviceSockets[chosen]).emit('relayMessage', {
+        message: 'hello world 0',
+        group: 0,
+      });
+    }
+  } else {
+    groupDevices.forEach(dName => {
+      if (deviceSockets[dName]) {
+        io.to(deviceSockets[dName]).emit('relayMessage', {
+          message: 'hello world 0',
+          group: 0,
+        });
+      }
+    });
+  }
+}
+
 io.on('connection', (socket) => {
   socket.on('register', (deviceName) => {
     deviceSockets[deviceName] = socket.id;
@@ -155,45 +193,11 @@ io.on('connection', (socket) => {
     }
   });
 
-   socket.on('enableSickoMode', () => {
+  socket.on('enableSickoMode', () => {
     if (!sickoModeActive) {
       sickoModeActive = true;
       io.emit('sickoModeState', { enabled: true });
-      sickoInterval = setInterval(() => {
-        const deviceNames = Object.keys(deviceTable);
-        if (deviceNames.length === 0) return;
-        const randomDevice = deviceNames[Math.floor(Math.random() * deviceNames.length)];
-        // Start a computation from a random device
-        io.emit('clearRelay');
-        if (deviceSockets[randomDevice]) {
-          io.to(deviceSockets[randomDevice]).emit('relayStarted');
-        }
-        relayState = {
-          originDevice: randomDevice,
-          currentGroup: 0,
-          groupsOrder: [0, 1, 2],
-        };
-        const groupDevices = groupToDeviceTable[0] || [];
-        if (deviceNames.length > 3 && groupDevices.length > 1) {
-          const idx = Math.floor(Math.random() * groupDevices.length);
-          const chosen = groupDevices[idx];
-          if (deviceSockets[chosen]) {
-            io.to(deviceSockets[chosen]).emit('relayMessage', {
-              message: 'hello world 0',
-              group: 0,
-            });
-          }
-        } else {
-          groupDevices.forEach(dName => {
-            if (deviceSockets[dName]) {
-              io.to(deviceSockets[dName]).emit('relayMessage', {
-                message: 'hello world 0',
-                group: 0,
-              });
-            }
-          });
-        }
-      }, 2000); // every 2 seconds
+      startSickoComputation();
     }
   });
 
@@ -201,8 +205,6 @@ io.on('connection', (socket) => {
     if (sickoModeActive) {
       sickoModeActive = false;
       io.emit('sickoModeState', { enabled: false });
-      if (sickoInterval) clearInterval(sickoInterval);
-      sickoInterval = null;
     }
   });
 
@@ -256,6 +258,12 @@ io.on('connection', (socket) => {
         io.to(originSocket).emit('relayFinished', { message: 'hello world finished' });
       }
       relayState = null;
+      // Only start a new computation if sicko mode is still enabled
+      if (sickoModeActive) {
+        setTimeout(() => {
+          startSickoComputation();
+        }, 1000); // 1 second pause between computations
+      }
     } else {
       const nextGroup = relayState.currentGroup;
       const groupDevices = groupToDeviceTable[nextGroup] || [];
