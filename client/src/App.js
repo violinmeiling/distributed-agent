@@ -17,6 +17,11 @@ const LAYER_COLORS = [
   '#FF00FF', // 12 - Magenta
 ];
 
+const IS_PROD = process.env.NODE_ENV === 'production';
+const BASE_URL = IS_PROD
+  ? 'https://distributed-agent.onrender.com'
+  : 'http://localhost:8080';
+
 function App() {
   const [relayLines, setRelayLines] = useState([]);
   const socketRef = useRef(null);
@@ -27,10 +32,11 @@ function App() {
   const [relayInProgress, setRelayInProgress] = useState(false);
   const [sickoMode, setSickoMode] = useState(false);
   const [root, setRoot] = useState(false);
+  const [initiator, setInitiator] = useState('');
 
   // Connect socket on mount
   useEffect(() => {
-    socketRef.current = io('https://distributed-agent.onrender.com');
+    socketRef.current = io(BASE_URL);
     return () => socketRef.current.disconnect();
   }, []);
 
@@ -38,7 +44,7 @@ function App() {
   useEffect(() => {
     const handleBeforeUnload = async () => {
       if (joined && deviceName) {
-        await fetch('https://distributed-agent.onrender.com/disconnect', {
+        await fetch(`${BASE_URL}/disconnect`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ deviceName }),
@@ -59,41 +65,61 @@ function App() {
       socketRef.current.on('updateLayers', ({ layers }) => {
         setLayers(layers);
       });
+socketRef.current.on('clearRelay', () => {
+  setRelayLines([]);
+  setRelayInProgress(true);
+});
 
-      socketRef.current.on('clearRelay', () => {
-        setRelayLines([]);
-        setRelayInProgress(true);
-      });
-
-      socketRef.current.on('relayStarted', () => {
-        setRelayLines(prev => prev.concat({
-          text: 'hello world started',
-          color: '#222',
-          key: `started-${Date.now()}`
-        }));
-      });
+ socketRef.current.on('relayStarted', () => {
+  setRelayLines([{
+    text: 'Request initiated',
+    color: '#222',
+    key: `initiated-${Date.now()}`
+  }]);
+});
 
       socketRef.current.on('relayMessage', ({ message, group }) => {
         const groupLayers = Array.from({ length: 4 }, (_, i) => group * 4 + i + 1);
         const hostedLayers = layers.filter(l => groupLayers.includes(l));
+
+        if (hostedLayers.length === 0) {
+          // This device doesn't process any layers for this group, just return.
+          return;
+        }
+
+        // Print "Received input from server" first, then all layers, then (after delay) "Sent output back to server"
         setRelayLines(prev =>
-          prev.concat(
-            hostedLayers.map(l => ({
-              text: 'hello world',
-              color: LAYER_COLORS[l - 1],
-              key: `${group}-${l}-${Date.now()}-${Math.random()}`
-            }))
-          )
+          prev
+            .concat({
+              text: 'Received input from server',
+              color: '#222',
+              key: `received-${group}-${Date.now()}`
+            })
+            .concat(
+              hostedLayers.map(l => ({
+                text: `Processing layer ${l}`,
+                color: LAYER_COLORS[l - 1],
+                key: `${group}-${l}-${Date.now()}-${Math.random()}`
+              }))
+            )
         );
+
         setTimeout(() => {
+          setRelayLines(prev => prev.concat({
+            text: 'Sent output back to server',
+            color: '#222',
+            key: `sent-${group}-${Date.now()}-${Math.random()}`
+          }));
           socketRef.current.emit('relayDone', { deviceName, group });
         }, 1000);
       });
 
+
       socketRef.current.on('relayFinished', ({ message }) => {
-        setRelayLines(prev => prev.concat({ text: message, color: '#222', key: `finished-${Date.now()}` }));
-        setRelayInProgress(false);
-      });
+  setRelayLines(prev => prev.concat({ text: message, color: '#222', key: `finished-${Date.now()}` }));
+  setRelayInProgress(false);
+  setInitiator('');
+});
 
       // Sicko mode state sync
       socketRef.current.on('sickoModeState', ({ enabled }) => {
@@ -115,7 +141,7 @@ function App() {
     if (deviceName === "root") {
       setRoot(true);
     }
-    await fetch('https://distributed-agent.onrender.com/joinNetwork', {
+    await fetch(`${BASE_URL}/joinNetwork`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deviceName }),
@@ -124,7 +150,7 @@ function App() {
     setDone(false);
     setRelayLines([]);
     // Fetch assigned layers after joining
-    const layersRes = await fetch('https://distributed-agent.onrender.com/runComputation', {
+    const layersRes = await fetch(`${BASE_URL}/runComputation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deviceName }),
@@ -134,7 +160,11 @@ function App() {
   };
 
   const disconnect = async () => {
-    await fetch('https://distributed-agent.onrender.com/disconnect', {
+    // Disable sicko mode before disconnecting
+    if (root && sickoMode) {
+      socketRef.current.emit('disableSickoMode');
+    }
+    await fetch(`${BASE_URL}/disconnect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deviceName }),
@@ -145,10 +175,10 @@ function App() {
     setRelayLines([]);
   };
 
-  const runComputation = () => {
-    setRelayLines([]);
-    socketRef.current.emit('startRelay', deviceName);
-  };
+ const runComputation = () => {
+  setInitiator(deviceName); // Mark this device as the initiator
+  socketRef.current.emit('startRelay', deviceName);
+};
 
   // Sicko mode logic: just emit, backend handles interval and sync
   const startSickoMode = () => {
@@ -180,11 +210,11 @@ function App() {
       <button onClick={runComputation} disabled={!joined}>
         Run Computation
       </button>
-      <button onClick={startSickoMode} disabled={!root || sickoMode}>
-        Enable Sicko Mode
+      <button onClick={startSickoMode} disabled={!joined || !root || sickoMode}>
+        Enable Simulation Mode
       </button>
-      <button onClick={stopSickoMode} disabled={!root || !sickoMode}>
-        Disable Sicko Mode
+      <button onClick={stopSickoMode} disabled={!joined || !root || !sickoMode}>
+        Disable Simulation Mode
       </button>
       <div style={{ margin: '1em 0', minHeight: 120 }}>
         {relayLines.map(line => (
