@@ -11,9 +11,10 @@ app.use(cors());
 app.use(express.json());
 
 const deviceTable = {}; // { deviceName: [layerNumbers] }
-const groupToDeviceTable = {}; // { groupIdx: [deviceName] }
+const groupToDeviceTable = {}; // { groupIdx: [deviceName, ...] }
 const layersToGroupTable = {}; // { layerNum: groupIdx }
 const deviceSockets = {}; // { deviceName: socket.id }
+const deviceTriggerCounts = {}; // { deviceName: number }
 const TOTAL_LAYERS = 12;
 const GROUP_SIZE = 4; // 3 groups of 4 layers each
 let sickoModeActive = false;
@@ -23,64 +24,45 @@ function resetGroups() {
   for (let i = 1; i <= TOTAL_LAYERS; i++) layersToGroupTable[i] = Math.floor((i - 1) / GROUP_SIZE);
 }
 
-// Assign one group per device, backend hosts the rest
+resetGroups();
+
 function redistributeLayers() {
-  resetGroups();
-  // Find all devices currently assigned to groups
-  const currentAssignments = {};
-  const assignedDevices = new Set();
-
-  // Build a reverse lookup: which device has which group
-  Object.entries(deviceTable).forEach(([deviceName, layers]) => {
-    if (layers.length > 0) {
-      const groupIdx = layersToGroupTable[layers[0]];
-      currentAssignments[groupIdx] = deviceName;
-      assignedDevices.add(deviceName);
-    }
-  });
-
-  // Assign groups 0, 1, 2
-  let unassignedDevices = Object.keys(deviceTable).filter(
-    d => !assignedDevices.has(d)
-  );
+  // 1. Remove disconnected devices from groupToDeviceTable
   for (let group = 0; group < 3; group++) {
-    if (currentAssignments[group] && deviceTable[currentAssignments[group]]) {
-      groupToDeviceTable[group] = [currentAssignments[group]];
-      // Ensure device has correct layers
-      const groupLayers = [];
-      for (let l = 1; l <= TOTAL_LAYERS; l++) {
-        if (layersToGroupTable[l] === group) groupLayers.push(l);
+    if (!groupToDeviceTable[group]) groupToDeviceTable[group] = [];
+    groupToDeviceTable[group] = groupToDeviceTable[group].filter(deviceName => deviceTable.hasOwnProperty(deviceName));
+  }
+
+  // 2. Find all assigned devices
+  const assigned = new Set(Object.values(groupToDeviceTable).flat());
+
+  // 3. Assign unassigned devices to the group with the fewest devices
+  const unassignedDevices = Object.keys(deviceTable).filter(d => !assigned.has(d));
+  for (const deviceName of unassignedDevices) {
+    // Find group with fewest devices
+    let minGroup = 0;
+    let minCount = groupToDeviceTable[0].length;
+    for (let g = 1; g < 3; g++) {
+      if (groupToDeviceTable[g].length < minCount) {
+        minGroup = g;
+        minCount = groupToDeviceTable[g].length;
       }
-      deviceTable[currentAssignments[group]] = groupLayers;
-    } else if (unassignedDevices.length > 0) {
-      // Assign this group to an unassigned device
-      const deviceName = unassignedDevices.shift();
-      groupToDeviceTable[group] = [deviceName];
-      const groupLayers = [];
-      for (let l = 1; l <= TOTAL_LAYERS; l++) {
-        if (layersToGroupTable[l] === group) groupLayers.push(l);
-      }
+    }
+    groupToDeviceTable[minGroup].push(deviceName);
+  }
+
+  // 4. Assign layers to each device based on their group(s)
+  for (let group = 0; group < 3; group++) {
+    const groupLayers = [];
+    for (let l = 1; l <= TOTAL_LAYERS; l++) {
+      if (layersToGroupTable[l] === group) groupLayers.push(l);
+    }
+    for (const deviceName of groupToDeviceTable[group]) {
       deviceTable[deviceName] = groupLayers;
-      currentAssignments[group] = deviceName;
-      assignedDevices.add(deviceName);
-    } else {
-      // No device for this group, backend will handle it
-      groupToDeviceTable[group] = [];
     }
   }
 
-  // Remove group assignments from any extra devices (shouldn't happen, but safe)
-  Object.keys(deviceTable).forEach(deviceName => {
-    const layers = deviceTable[deviceName];
-    if (
-      layers.length > 0 &&
-      !Object.values(currentAssignments).includes(deviceName)
-    ) {
-      deviceTable[deviceName] = [];
-    }
-  });
-
-  // Push updated layers to all connected devices
+  // 5. Push updated layers to all connected devices
   Object.keys(deviceTable).forEach(deviceName => {
     const socketId = deviceSockets[deviceName];
     if (socketId) {
@@ -88,21 +70,7 @@ function redistributeLayers() {
     }
   });
   console.log('deviceTable:', deviceTable);
-}
-
-// Simulate backend processing for a group
-function backendProcessGroup(group) {
-  const groupLayers = [];
-  for (let l = 1; l <= TOTAL_LAYERS; l++) {
-    if (layersToGroupTable[l] === group) groupLayers.push(l);
-  }
-  groupLayers.forEach(l => {
-    console.log(`Backend processing layer ${l}`);
-  });
-  setTimeout(() => {
-    console.log('Backend: Sent output back to server for group', group);
-    relayDoneFromBackend(group);
-  }, 1000);
+  console.log('groupToDeviceTable:', groupToDeviceTable);
 }
 
 // Backend relayDone logic
@@ -122,21 +90,32 @@ function relayDoneFromBackend(group) {
     }
   } else {
     const nextGroup = relayState.currentGroup;
-    const groupDevices = groupToDeviceTable[nextGroup] || [];
-    if (groupDevices.length > 0) {
-      // Usual device logic
-      groupDevices.forEach(dName => {
-        if (deviceSockets[dName]) {
-          io.to(deviceSockets[dName]).emit('relayMessage', {
-            message: `hello world ${nextGroup}`,
-            group: nextGroup,
-          });
-        }
+    routeRelayToGroup(nextGroup);
+  }
+}
+
+// Route relay to the device in the group with the lowest trigger count
+function routeRelayToGroup(groupIdx) {
+  const groupDevices = groupToDeviceTable[groupIdx] || [];
+  if (groupDevices.length > 0) {
+    // Choose the device with the lowest trigger count
+    let chosen = groupDevices[0];
+    let minCount = deviceTriggerCounts[chosen] || 0;
+    groupDevices.forEach(dName => {
+      if ((deviceTriggerCounts[dName] || 0) < minCount) {
+        chosen = dName;
+        minCount = deviceTriggerCounts[dName] || 0;
+      }
+    });
+    deviceTriggerCounts[chosen] = (deviceTriggerCounts[chosen] || 0) + 1;
+    if (deviceSockets[chosen]) {
+      io.to(deviceSockets[chosen]).emit('relayMessage', {
+        message: `hello world ${groupIdx}`,
+        group: groupIdx,
       });
-    } else {
-      // Backend processes this group
-      backendProcessGroup(nextGroup);
     }
+  } else {
+    backendProcessGroup(groupIdx);
   }
 }
 
@@ -145,6 +124,7 @@ app.post('/joinNetwork', (req, res) => {
   if (!deviceName) return res.status(400).send('Device name required');
   if (!deviceTable[deviceName]) {
     deviceTable[deviceName] = [];
+    deviceTriggerCounts[deviceName] = 0;
     redistributeLayers();
     console.log(`Device joined: ${deviceName}`);
   }
@@ -155,6 +135,7 @@ app.post('/disconnect', (req, res) => {
   const { deviceName } = req.body;
   if (deviceTable[deviceName]) {
     delete deviceTable[deviceName];
+    delete deviceTriggerCounts[deviceName];
     Object.values(groupToDeviceTable).forEach(arr => {
       const idx = arr.indexOf(deviceName);
       if (idx !== -1) arr.splice(idx, 1);
@@ -189,19 +170,7 @@ function startRelayOrSicko(originDevice) {
     groupsOrder: [0, 1, 2],
   };
   // Start with group 0
-  const groupDevices = groupToDeviceTable[0] || [];
-  if (groupDevices.length > 0) {
-    groupDevices.forEach(dName => {
-      if (deviceSockets[dName]) {
-        io.to(deviceSockets[dName]).emit('relayMessage', {
-          message: 'hello world 0',
-          group: 0,
-        });
-      }
-    });
-  } else {
-    backendProcessGroup(0);
-  }
+  routeRelayToGroup(0);
 }
 
 function startSickoComputation() {
@@ -266,19 +235,7 @@ io.on('connection', (socket) => {
       }
     } else {
       const nextGroup = relayState.currentGroup;
-      const groupDevices = groupToDeviceTable[nextGroup] || [];
-      if (groupDevices.length > 0) {
-        groupDevices.forEach(dName => {
-          if (deviceSockets[dName]) {
-            io.to(deviceSockets[dName]).emit('relayMessage', {
-              message: `hello world ${nextGroup}`,
-              group: nextGroup,
-            });
-          }
-        });
-      } else {
-        backendProcessGroup(nextGroup);
-      }
+      routeRelayToGroup(nextGroup);
     }
   });
 });
