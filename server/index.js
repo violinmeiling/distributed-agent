@@ -94,6 +94,20 @@ function relayDoneFromBackend(group) {
   }
 }
 
+function backendProcessGroup(groupIdx) {
+  const groupLayers = [];
+  for (let l = 1; l <= TOTAL_LAYERS; l++) {
+    if (layersToGroupTable[l] === groupIdx) groupLayers.push(l);
+  }
+  groupLayers.forEach(l => {
+    console.log(`Backend processing layer ${l}`);
+  });
+  setTimeout(() => {
+    console.log('Backend: Sent output back to server for group', groupIdx);
+    relayDoneFromBackend(groupIdx);
+  }, 1000);
+}
+
 // Route relay to the device in the group with the lowest trigger count
 function routeRelayToGroup(groupIdx) {
   const groupDevices = groupToDeviceTable[groupIdx] || [];
